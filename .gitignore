@@ -1,0 +1,24 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Rust
+target/
+
+# Go
+/gateway/bin/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
