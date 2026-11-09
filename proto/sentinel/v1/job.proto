@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package sentinel.v1;
+
+// TriageJob describes one failed CI run for the agent to investigate.
+// Produced by the gateway; field names match the gateway's JSON job payload.
+message TriageJob {
+  string delivery_id = 1;        // X-GitHub-Delivery, for deduplication
+  string repo = 2;               // "owner/name"
+  int64 run_id = 3;              // workflow run ID
+  string workflow = 4;           // workflow name
+  string branch = 5;
+  string head_sha = 6;
+  string run_url = 7;
+  repeated int32 pr_numbers = 8; // PRs the run belongs to, if any
+}
+
+// Diagnosis is the agent's structured answer for one TriageJob.
+message Diagnosis {
+  enum Confidence {
+    CONFIDENCE_UNSPECIFIED = 0;
+    CONFIDENCE_LOW = 1;
+    CONFIDENCE_MEDIUM = 2;
+    CONFIDENCE_HIGH = 3;
+  }
+
+  string summary = 1;            // one-line description of the failure
+  string root_cause = 2;
+  Confidence confidence = 3;
+  repeated string evidence = 4;  // log lines supporting the diagnosis
+  string suggested_fix = 5;
+}

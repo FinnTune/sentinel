@@ -24,6 +24,7 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       go: ${{ steps.filter.outputs.go }}
       rust: ${{ steps.filter.outputs.rust }}
+      proto: ${{ steps.filter.outputs.proto }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -40,6 +41,9 @@ jobs:
               - ".github/workflows/ci.yml"
             rust:
               - "logscan/**"
+              - "proto/**"
+              - ".github/workflows/ci.yml"
+            proto:
               - "proto/**"
               - ".github/workflows/ci.yml"
 
@@ -114,11 +118,22 @@ jobs:
       - name: Test
         run: cargo test
 
+  proto:
+    needs: changes
+    if: needs.changes.outputs.proto == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Compile protos
+        run: protoc --proto_path=proto --descriptor_set_out=/dev/null $(find proto -name '*.proto')
+
   # Single required check for branch protection. Skipped jobs count as success;
   # failed or cancelled jobs do not.
   ci-ok:
     if: always()
-    needs: [changes, python, go, rust]
+    needs: [changes, python, go, rust, proto]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs passed or were skipped
