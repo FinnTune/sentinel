@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package sentinel.v1;
+
+// LogScan extracts the error-relevant regions from a CI log.
+// Mirrors the logscan crate's Options and Window types.
+service LogScan {
+  rpc Extract(ExtractRequest) returns (ExtractResponse);
+}
+
+message ExtractRequest {
+  string log = 1;
+  // Zero values mean "use the default" (before=3, after=5, max_windows=20).
+  uint32 before = 2;
+  uint32 after = 3;
+  uint32 max_windows = 4;
+}
+
+message ExtractResponse {
+  repeated Window windows = 1;
+}
+
+message Window {
+  uint32 start_line = 1;         // 1-based, inclusive
+  uint32 end_line = 2;           // 1-based, inclusive
+  repeated string lines = 3;     // ANSI escapes removed
+  uint32 repeats = 4;            // identical windows collapsed into this one
+}
