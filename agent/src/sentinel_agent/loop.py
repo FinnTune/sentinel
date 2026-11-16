@@ -13,6 +13,8 @@ DEFAULT_MODEL = "claude-opus-5-5"
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 ToolHandler = Callable[[dict[str, Any]], str]
 
+CACHE_CONTROL = {"type": "ephemeral"}
+
 
 class AgentError(Exception):
     """The loop could not produce a final answer."""
@@ -40,9 +42,32 @@ class Tool:
 
 
 @dataclass
+class Usage:
+    """Token usage summed over every request in a run."""
+
+    input_tokens: int = 0  # uncached remainder only
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    def add(self, usage: Any) -> None:
+        self.input_tokens += usage.input_tokens or 0
+        self.output_tokens += usage.output_tokens or 0
+        self.cache_creation_input_tokens += usage.cache_creation_input_tokens or 0
+        self.cache_read_input_tokens += usage.cache_read_input_tokens or 0
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        """Share of prompt tokens served from cache (0.0 when nothing was sent)."""
+        total = self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+        return self.cache_read_input_tokens / total if total else 0.0
+
+
+@dataclass
 class AgentResult:
     text: str
     turns: int
+    usage: Usage = field(default_factory=Usage)
     messages: list[MessageParam] = field(default_factory=list)
 
 
@@ -56,11 +81,20 @@ def run_agent(
     effort: Effort = "medium",
     max_tokens: int = 16000,
     max_turns: int = 10,
+    cache: bool = True,
 ) -> AgentResult:
-    """Run the tool-use loop until Claude finishes or a limit is hit."""
-    tool_map = {t.name: t for t in tools or []}
-    tool_params = [t.to_param() for t in tools or []]
+    """Run the tool-use loop until Claude finishes or a limit is hit.
+
+    With `cache` on, the system prompt (and the tools before it) get an explicit
+    breakpoint, and top-level automatic caching covers the growing conversation.
+    Keep `system` and `tools` byte-identical between runs, or the cache misses.
+    """
+    # Tools render first in the prompt: a stable order keeps the prefix stable.
+    ordered = sorted(tools or [], key=lambda t: t.name)
+    tool_map = {t.name: t for t in ordered}
+    tool_params = [t.to_param() for t in ordered]
     messages: list[MessageParam] = [{"role": "user", "content": user_input}]
+    usage = Usage()
 
     for turn in range(1, max_turns + 1):
         kwargs: dict[str, Any] = {
@@ -71,11 +105,19 @@ def run_agent(
             "output_config": {"effort": effort},
         }
         if system:
-            kwargs["system"] = system
+            if cache:
+                kwargs["system"] = [
+                    {"type": "text", "text": system, "cache_control": dict(CACHE_CONTROL)}
+                ]
+            else:
+                kwargs["system"] = system
         if tool_params:
             kwargs["tools"] = tool_params
+        if cache:
+            kwargs["cache_control"] = dict(CACHE_CONTROL)
 
         response = client.messages.create(**kwargs)
+        usage.add(response.usage)
         stop = response.stop_reason
 
         if stop == "refusal":
@@ -90,7 +132,7 @@ def run_agent(
             continue
         if stop != "tool_use":
             text = "".join(b.text for b in response.content if b.type == "text")
-            return AgentResult(text=text, turns=turn, messages=messages)
+            return AgentResult(text=text, turns=turn, usage=usage, messages=messages)
 
         # All results for a turn go back together in a single user message.
         results = [

@@ -4,7 +4,7 @@ from typing import Any, cast
 import anthropic
 import pytest
 
-from sentinel_agent.loop import AgentError, AgentRefusal, Tool, run_agent
+from sentinel_agent.loop import AgentError, AgentRefusal, Tool, Usage, run_agent
 
 
 def text(value: str) -> SimpleNamespace:
@@ -15,8 +15,24 @@ def tool_use(id_: str, name: str, tool_input: dict[str, Any]) -> SimpleNamespace
     return SimpleNamespace(type="tool_use", id=id_, name=name, input=tool_input)
 
 
-def reply(stop_reason: str, *blocks: SimpleNamespace) -> SimpleNamespace:
-    return SimpleNamespace(stop_reason=stop_reason, content=list(blocks))
+def usage(
+    input_tokens: int = 10,
+    output_tokens: int = 5,
+    created: int | None = None,
+    read: int | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=created,
+        cache_read_input_tokens=read,
+    )
+
+
+def reply(
+    stop_reason: str, *blocks: SimpleNamespace, tokens: SimpleNamespace | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(stop_reason=stop_reason, content=list(blocks), usage=tokens or usage())
 
 
 class FakeClient:
@@ -57,7 +73,7 @@ def test_request_uses_adaptive_thinking_and_effort() -> None:
     call = fake.calls[0]
     assert call["thinking"] == {"type": "adaptive"}
     assert call["output_config"] == {"effort": "low"}
-    assert call["system"] == "be brief"
+    assert call["system"][0]["text"] == "be brief"
     assert "tools" not in call
 
 
@@ -135,3 +151,56 @@ def test_turn_limit_raises() -> None:
     )
     with pytest.raises(AgentError, match="2 turns"):
         run_agent(fake.as_client(), "go", tools=[echo_tool()], max_turns=2)
+
+
+def test_caching_marks_system_prompt_and_conversation_tail() -> None:
+    fake = FakeClient(reply("end_turn", text("ok")))
+    run_agent(fake.as_client(), "hi", system="stable prompt")
+    call = fake.calls[0]
+    assert call["system"] == [
+        {"type": "text", "text": "stable prompt", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert call["cache_control"] == {"type": "ephemeral"}
+
+
+def test_caching_can_be_disabled() -> None:
+    fake = FakeClient(reply("end_turn", text("ok")))
+    run_agent(fake.as_client(), "hi", system="stable prompt", cache=False)
+    call = fake.calls[0]
+    assert call["system"] == "stable prompt"
+    assert "cache_control" not in call
+
+
+def test_tools_are_sent_in_a_stable_order() -> None:
+    def tool(name: str) -> Tool:
+        return Tool(name, "d", {"type": "object"}, lambda _: "")
+
+    first = FakeClient(reply("end_turn", text("ok")))
+    second = FakeClient(reply("end_turn", text("ok")))
+    run_agent(first.as_client(), "hi", tools=[tool("b"), tool("c"), tool("a")])
+    run_agent(second.as_client(), "hi", tools=[tool("c"), tool("a"), tool("b")])
+
+    assert [t["name"] for t in first.calls[0]["tools"]] == ["a", "b", "c"]
+    assert first.calls[0]["tools"] == second.calls[0]["tools"]
+
+
+def test_usage_is_summed_across_turns() -> None:
+    fake = FakeClient(
+        reply(
+            "tool_use",
+            tool_use("t1", "echo", {"msg": "a"}),
+            tokens=usage(input_tokens=100, output_tokens=20, created=900),
+        ),
+        reply("end_turn", text("done"), tokens=usage(input_tokens=30, output_tokens=40, read=900)),
+    )
+    result = run_agent(fake.as_client(), "go", tools=[echo_tool()])
+
+    assert result.usage.input_tokens == 130
+    assert result.usage.output_tokens == 60
+    assert result.usage.cache_creation_input_tokens == 900
+    assert result.usage.cache_read_input_tokens == 900
+    assert result.usage.cache_hit_ratio == pytest.approx(900 / 1930)
+
+
+def test_cache_hit_ratio_is_zero_with_no_tokens() -> None:
+    assert Usage().cache_hit_ratio == 0.0
